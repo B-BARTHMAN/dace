@@ -9,7 +9,7 @@ import sympy
 from sympy import simplify
 
 
-@dataclass
+@dataclass(unsafe_hash=True)
 class SplitDimensions(ppl.Pass):
 
     def _block_maps():
