@@ -20,10 +20,10 @@ class AddScaleBias(ppl.Pass):
     def modifies(self) -> ppl.Modifies:
         ppl.Modifies.AccessNodes
     
-    def should_reapply(self, modified) -> bool:
+    def should_reapply(self, _) -> bool:
         return False
     
-    def apply_pass(self, sdfg: dace.SDFG, pipeline_results: Dict[str, Any]) -> None:
+    def apply_pass(self, sdfg: dace.SDFG, _: Dict[str, Any]) -> None:
         
         array : Array = sdfg.arrays[self._name]
         split_shape = array.shape # actually shape is already split, so i need to change this somehow

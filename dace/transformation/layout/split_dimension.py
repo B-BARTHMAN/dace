@@ -1,7 +1,8 @@
 import dace
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Set
 from dace.sdfg.graph import Edge, EdgeT
 from dace.transformation import pass_pipeline as ppl
+from dace.transformation.blockedfp.passes.map_tiling_pass import MapTilingPass
 from dataclasses import dataclass
 import copy
 import re
@@ -11,6 +12,9 @@ from sympy import simplify
 
 @dataclass(unsafe_hash=True)
 class SplitDimensions(ppl.Pass):
+    
+    def depends_on(self) -> Set[ppl.Pass]:
+        return {MapTilingPass}
 
     def _block_maps():
         pass

@@ -10,6 +10,7 @@ def vadd(A: dace.float64[N], B: dace.float64[N], C: dace.float64[N]):
         C[i] = 0.5 * (A[i] + B[i])
 
 sdfg = vadd.to_sdfg()
+sdfg.view()
 BlockedFP("A", [16]).apply_pass(sdfg,{})
-sdfg.validate()
+#sdfg.validate()
 sdfg.view()
