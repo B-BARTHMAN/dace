@@ -6,6 +6,7 @@ from dace.transformation.layout.split_dimension import SplitDimensions
 from dace.transformation.blockedfp.passes.add_scale_bias_pass import AddScaleBias
 from dace.transformation.blockedfp.passes.change_fp_type_pass import ChangeFPType
 from dace.transformation.blockedfp.passes.extend_tasklets_pass import ExtendTaskletsPass
+from dace.transformation.blockedfp.passes.replace_tasklets_pass import ReplaceTaskletsPass
 
 class BlockedFP(Pipeline):
     """
@@ -19,7 +20,6 @@ class BlockedFP(Pipeline):
         if not block_size:
             raise ValueError("block_size must contain at least one dimension!")
         
-        
         self._block_size = block_size
         
         split_map = {
@@ -31,7 +31,8 @@ class BlockedFP(Pipeline):
             SplitDimensions(split_map=split_map),
             AddScaleBias(name=name, block_size=block_size),
             ChangeFPType(name=name),
-            ExtendTaskletsPass(name=name)
+            ExtendTaskletsPass(name=name),
+            ReplaceTaskletsPass(name=name),
         ]
         
         super().__init__(passes=passes)

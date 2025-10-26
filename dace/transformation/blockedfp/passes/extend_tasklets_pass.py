@@ -77,14 +77,14 @@ class ExtendTaskletsTransform(xf.SingleStateTransformation):
         graph.add_edge(self.outer_map, f"OUT_{self._name}_bias", self.inner_map, f"IN_{self._name}_bias", dace.Memlet(data=f"{self._name}_bias", subset=inner_subset))
         
         # Step 6: Add more connectors to tasklet?
-        self.tasklet.add_in_connector(f"scale")
-        self.tasklet.add_in_connector(f"bias")
+        self.tasklet.add_in_connector(f"{self._name}_scale_in")
+        self.tasklet.add_in_connector(f"{self._name}_bias_in")
         
         # Step 7: Connect inner map to tasklet
         connector = self._get_tasklet_connector(graph, self.tasklet, self._name)
         tasklet_subset = self._get_connector_memlet_range(graph, self.tasklet, connector)
-        graph.add_edge(self.inner_map, f"OUT_{self._name}_scale", self.tasklet, "scale", dace.Memlet(data=f"{self._name}_scale", subset=tasklet_subset))
-        graph.add_edge(self.inner_map, f"OUT_{self._name}_bias", self.tasklet, "bias", dace.Memlet(data=f"{self._name}_bias", subset=tasklet_subset))
+        graph.add_edge(self.inner_map, f"OUT_{self._name}_scale", self.tasklet, f"{self._name}_scale_in", dace.Memlet(data=f"{self._name}_scale", subset=tasklet_subset))
+        graph.add_edge(self.inner_map, f"OUT_{self._name}_bias", self.tasklet, f"{self._name}_bias_in", dace.Memlet(data=f"{self._name}_bias", subset=tasklet_subset))
         
     
     # this part is a bit ugly using the subsets, to extract the used range of the array
