@@ -2,13 +2,13 @@ import dace
 import dace.transformation.pass_pipeline as ppl
 from dace.transformation.dataflow import MapTiling
 from dataclasses import dataclass
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 @dataclass(unsafe_hash=True)
 class MapTilingPass(ppl.Pass):
     
-    def __init__(self, name: str):
-        self._name = name
+    def __init__(self, names: List[str]):
+        self._names = names
     
     def modifies(self) -> ppl.Modifies:
         return ppl.Modifies.Everything
@@ -21,15 +21,21 @@ class MapTilingPass(ppl.Pass):
         for state in sdfg.states():
             for map_entry in [n for n in state.nodes() if isinstance(n, dace.nodes.MapEntry)]:
                 
-                # primitive check if this map reads from our desired array
-                skip = True
-                for edge in state.in_edges(map_entry):
-                    if edge.data.data == f"{self._name}":
-                        skip = False
-                        break
-                    map_entry
+                # Get the corresponding exit node
+                map_exit = state.exit_node(map_entry)
                 
-                if skip:
+                # primitive check if this map reads from or writes to one of our desired arrays
+                tile = False
+                for edge in state.in_edges(map_entry):
+                    if edge.data.data in self._names:
+                        tile = True
+                        break
+                for edge in state.out_edges(map_exit):
+                    if edge.data.data in self._names:
+                        tile = True
+                        break
+                
+                if not tile:
                     continue
                   
                 MapTiling.apply_to(
@@ -37,7 +43,8 @@ class MapTilingPass(ppl.Pass):
                     options={
                         "tile_sizes": [16],
                         "divides_evenly": True,
-                        "tile_trivial": True
+                        "tile_trivial": False,
+                        "skew": False
                     },
                     map_entry=map_entry
                 )

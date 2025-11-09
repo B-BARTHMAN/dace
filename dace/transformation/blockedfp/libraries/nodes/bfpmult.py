@@ -2,12 +2,12 @@ import dace
 from dace.transformation.transformation import ExpandTransformation
 
 @dace.library.expansion
-class ExpandBFPAddNode(ExpandTransformation):
+class ExpandBFPMultNode(ExpandTransformation):
     environments = []
     
     @staticmethod
-    def expansion(node: "BFPAddNode", parent_state: dace.SDFGState, parent_sdfg: dace.SDFGState) -> dace.nodes.Tasklet:
-        code = "_out = _scale * _fp + _bias + _other"
+    def expansion(node: "BFPMultNode", parent_state: dace.SDFGState, parent_sdfg: dace.SDFGState) -> dace.nodes.Tasklet:
+        code = "out_fp = a_fp"
         return dace.nodes.Tasklet(
             node.name,
             node.in_connectors,
@@ -17,12 +17,12 @@ class ExpandBFPAddNode(ExpandTransformation):
         
 
 @dace.library.node
-class BFPAddNode(dace.sdfg.nodes.LibraryNode):
+class BFPMultNode(dace.sdfg.nodes.LibraryNode):
     
     implementations = {
-        "pure": ExpandBFPAddNode,
+        "pure": ExpandBFPMultNode,
     }
     default_implementation = 'pure'
     
     def __init__(self, name):
-        super().__init__(name, inputs={"_scale", "_bias", "_fp", "_other"}, outputs={"_out"})
+        super().__init__(name, inputs={"a_scale", "a_bias", "a_fp", "b_scale", "b_bias", "b_fp"}, outputs={"out_scale", "out_bias", "out_fp"})

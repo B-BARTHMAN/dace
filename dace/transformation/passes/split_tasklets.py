@@ -10,6 +10,7 @@ from dace.transformation import pass_pipeline as ppl, transformation
 import ast
 from dace.sdfg.nodes import CodeBlock
 
+from dace.transformation.layout.split_dimension import SplitDimensions
 
 class ASTSplitter:
 
@@ -166,7 +167,7 @@ class SplitTasklets(ppl.Pass):
         return False
 
     def depends_on(self):
-        return {}
+        return {SplitDimensions}
 
     tmp_access_identifier = "_split_"
 

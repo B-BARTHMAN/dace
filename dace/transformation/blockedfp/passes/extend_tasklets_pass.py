@@ -1,21 +1,23 @@
 import dace
 import dace.transformation.pass_pipeline as ppl
-from dace.transformation.blockedfp.passes.add_scale_bias_pass import AddScaleBias
+from dace.transformation.blockedfp.passes.extend_map_pass import ExtendMapPass
+import dace.transformation.blockedfp.libraries as bfplib
 import dace.transformation as xf
 from dataclasses import dataclass
 from dace.sdfg.state import StateSubgraphView
 from dace.sdfg.utils import node_path_graph
 from typing import Dict, Any, Set, List
+import dace.sdfg.tasklet_utils as tutil
 
 @dataclass(unsafe_hash=True)
 class ExtendTaskletsPass(ppl.Pass):
     
-    def __init__(self, name: str):
-        self._name = name
+    def __init__(self, names: List[str]):
+        self._names = names
     
     # this pass has to run after the add scale/bias step
     def depends_on(self) -> Set[ppl.Pass]:
-        return {AddScaleBias}
+        return {ExtendMapPass}
     
     def modifies(self) -> ppl.Modifies:
         return ppl.Modifies.Everything
@@ -24,80 +26,189 @@ class ExtendTaskletsPass(ppl.Pass):
         return False
     
     def apply_pass(self, sdfg: dace.SDFG, _: Dict[str, Any]):
-        sdfg.apply_transformations(ExtendTaskletsTransform, options={"name": self._name}, validate=False)
+        sdfg.apply_transformations(ExtendTaskletsTransform, options={"names": self._names}, validate=False)
 
 
 class ExtendTaskletsTransform(xf.SingleStateTransformation):
     
-    access = xf.PatternNode(dace.nodes.AccessNode)
-    outer_map = xf.PatternNode(dace.nodes.MapEntry)
-    inner_map = xf.PatternNode(dace.nodes.MapEntry)
+    map_entry = xf.PatternNode(dace.nodes.MapEntry)
     tasklet = xf.PatternNode(dace.nodes.Tasklet)
     
-    def __init__(self, name: str):
-        self._name = name
+    def __init__(self, names: List[str]):
+        self._names = names
     
     @classmethod
     def expressions(cls) -> List[StateSubgraphView]:
-        return [node_path_graph(cls.access, cls.outer_map, cls.inner_map, cls.tasklet)]
+        return [node_path_graph(cls.map_entry, cls.tasklet)]
     
     def can_be_applied(self, graph: dace.SDFGState, expr_index: int, sdfg: dace.SDFG, permissive = False) -> bool:
         
-        if self.access.data != self._name:
-            return False
+        # Check if map reads from one of our arrays
+        for edge in graph.in_edges(self.map_entry):
+            if edge.data.data in self._names:
+                return True
+        # Check if map writes to one of our arrays
+        for edge in graph.out_edges(graph.exit_node(self.map_entry)):
+            if edge.data.data in self._names:
+                return True
         
-        return True
+        return False
     
     def apply(self, graph: dace.SDFGState, sdfg: dace.SDFG) -> None:
+        map_exit: dace.nodes.MapExit = graph.exit_node(self.map_entry)
         
-        # Step 1: Add new access nodes
-        scale_acccess = graph.add_access(f"{self._name}_scale")
-        bias_acccess = graph.add_access(f"{self._name}_bias")
+        # Extend the intermediate access nodes
+        for node in graph.all_nodes_between(self.map_entry, map_exit):
+            if isinstance(node, dace.nodes.AccessNode):
+                self._extend_access_node(node, graph, sdfg)
         
-        # Step 2: Add connectors to outer map
-        self.outer_map.add_in_connector(f"IN_{self._name}_scale")
-        self.outer_map.add_out_connector(f"OUT_{self._name}_scale")
-        self.outer_map.add_in_connector(f"IN_{self._name}_bias")
-        self.outer_map.add_out_connector(f"OUT_{self._name}_bias")
+        # Now iterate through all tasklets, change them to a sick new library node, and connect things up
+        for node in graph.all_nodes_between(self.map_entry, map_exit):
+            if isinstance(node, dace.nodes.Tasklet):
+                self._extend_tasklet(node, graph, sdfg)
         
-        # Step 3: Connect access to outer map
-        outer_subset = self._get_connector_memlet_range(graph, self.outer_map, f"IN_{self._name}")
-        graph.add_edge(scale_acccess, None, self.outer_map, f"IN_{self._name}_scale", dace.Memlet(data=f"{self._name}_scale", subset=outer_subset))
-        graph.add_edge(bias_acccess, None, self.outer_map, f"IN_{self._name}_bias", dace.Memlet(data=f"{self._name}_bias", subset=outer_subset))
+        # Now iterate through all tasklets again and kill them
+        for node in graph.all_nodes_between(self.map_entry, map_exit):
+            if isinstance(node, dace.nodes.Tasklet):
+                graph.remove_node(node)
         
-        # Step 4: Add connectors to inner map
-        self.inner_map.add_in_connector(f"IN_{self._name}_scale")
-        self.inner_map.add_out_connector(f"OUT_{self._name}_scale")
-        self.inner_map.add_in_connector(f"IN_{self._name}_bias")
-        self.inner_map.add_out_connector(f"OUT_{self._name}_bias")
+        # directly connect outer map to first libnode now
+        for in_edge in graph.in_edges(self.map_entry):
+            for out_edge in graph.out_edges(self.map_entry):
+                # Ugly check if the connectors are supposed to be the same
+                if in_edge.dst_conn[3:] != out_edge.src_conn[4:]:
+                    continue
+                
+                # directly connect outer map over inner map
+                graph.add_edge(in_edge.src, in_edge.src_conn, out_edge.dst, out_edge.dst_conn, in_edge.data)
+                
+        for in_edge in graph.in_edges(map_exit):
+            for out_edge in graph.out_edges(map_exit):
+                # Ugly check if the connectors are supposed to be the same
+                if in_edge.dst_conn[3:] != out_edge.src_conn[4:]:
+                    continue
+                
+                # directly connect outer map over inner map
+                graph.add_edge(in_edge.src, in_edge.src_conn, out_edge.dst, out_edge.dst_conn, out_edge.data)
         
-        # Step 5: Connect outer map to inner map
-        inner_subset = self._get_connector_memlet_range(graph, self.inner_map, f"IN_{self._name}")
-        graph.add_edge(self.outer_map, f"OUT_{self._name}_scale", self.inner_map, f"IN_{self._name}_scale", dace.Memlet(data=f"{self._name}_scale", subset=inner_subset))
-        graph.add_edge(self.outer_map, f"OUT_{self._name}_bias", self.inner_map, f"IN_{self._name}_bias", dace.Memlet(data=f"{self._name}_bias", subset=inner_subset))
-        
-        # Step 6: Add more connectors to tasklet?
-        self.tasklet.add_in_connector(f"{self._name}_scale_in")
-        self.tasklet.add_in_connector(f"{self._name}_bias_in")
-        
-        # Step 7: Connect inner map to tasklet
-        connector = self._get_tasklet_connector(graph, self.tasklet, self._name)
-        tasklet_subset = self._get_connector_memlet_range(graph, self.tasklet, connector)
-        graph.add_edge(self.inner_map, f"OUT_{self._name}_scale", self.tasklet, f"{self._name}_scale_in", dace.Memlet(data=f"{self._name}_scale", subset=tasklet_subset))
-        graph.add_edge(self.inner_map, f"OUT_{self._name}_bias", self.tasklet, f"{self._name}_bias_in", dace.Memlet(data=f"{self._name}_bias", subset=tasklet_subset))
-        
+        graph.remove_node(self.map_entry)
+        graph.remove_node(map_exit)
     
-    # this part is a bit ugly using the subsets, to extract the used range of the array
-    def _get_connector_memlet_range(self, state: dace.SDFGState, node: dace.nodes.MapEntry, connector: str) -> dace.subsets.Range:
-        # find all edges
-        edges = list(state.in_edges_by_connector(node, connector))
-        if len(edges) != 1:
-            raise ValueError("This graph has a weird shape")
-        edge = edges[0]
-        return dace.subsets.Range([edge.data.src_subset.ranges[0]])
+    def _extend_access_node(self, node: dace.nodes.AccessNode, state: dace.SDFGState, sdfg: dace.SDFG) -> None:
+        # Get the name of the array
+        name = node.data
+        
+        # Change fp type and shape
+        sdfg.arrays[name].dtype = dace.dtypes.float16
+        sdfg.arrays[name].shape = (16,) # TODO: CHANGE THIS FOR MULTIDIMENSIONAL THINGS!!!
+        
+        # Add new arrays
+        sdfg.add_array(f"{name}_bias", shape=(1,), dtype=dace.dtypes.float64, transient=True)
+        sdfg.add_array(f"{name}_scale", shape=(1,), dtype=dace.dtypes.float64, transient=True)
+        
+        # Add Access nodes
+        state.add_access(f"{name}_bias")
+        state.add_access(f"{name}_scale")
+        
+        # Add name to array
+        self._names.append(name)
     
-    def _get_tasklet_connector(self, state: dace.SDFGState, tasklet: dace.nodes.Tasklet, name: str) -> str:
-        for connector in tasklet.in_connectors:
-            for edge in state.edges_by_connector(tasklet, connector):
-                if edge.data.data == name:
-                    return connector
+    def _extend_tasklet(self, tasklet: dace.nodes.Tasklet, state: dace.SDFGState, sdfg: dace.SDFG) -> None:
+        
+        # Get classification of this tasklet
+        classification = tutil.classify_tasklet(state, tasklet)
+        
+        # Find corresponding library node and add it
+        if classification["type"] is tutil.TaskletType.ARRAY_ARRAY or classification["type"] is tutil.TaskletType.ARRAY_SCALAR or classification["type"] is tutil.TaskletType.SCALAR_ARRAY or classification["type"] is tutil.TaskletType.SCALAR_SCALAR:
+            match classification["op"]:
+                case '+':
+                    libnode = bfplib.BFPAddNode(tasklet.name)
+                case '*':
+                    libnode = bfplib.BFPMultNode(tasklet.name)
+                case op:
+                    raise ValueError(f"Unsopported op encountered with array op '{op}'")
+        elif classification["type"] is tutil.TaskletType.ARRAY_SYMBOL or classification["type"] is tutil.TaskletType.SCALAR_SYMBOL:
+            match classification["op"]:
+                case '+':
+                    libnode = bfplib.BFPAddSymNode(tasklet.name, classification["constant1"] or classification["constant2"])
+                case '*':
+                    libnode = bfplib.BFPMultSymNode(tasklet.name, classification["constant1"] or classification["constant2"])
+                case op:
+                    raise ValueError(f"Unsupported op encountered with symbol op '{op}'")
+        elif classification["type"] is tutil.TaskletType.ARRAY_SCALAR_ASSIGNMENT or classification["type"] is tutil.TaskletType.ARRAY_ARRAY_ASSIGNMENT:
+            libnode = bfplib.BFPAssignScalarNode(tasklet.name)
+        else:
+            raise ValueError(f"WHAT THE FUCK AM I SEEING, {classification['type']}")
+        
+        # Add new libnode
+        state.add_node(libnode)
+        
+        # Connect libnode
+        self._connect_libnodes(tasklet, libnode, state, sdfg)
+    
+    def _connect_libnodes(self, tasklet: dace.nodes.Tasklet, libnode: dace.nodes.LibraryNode, state: dace.SDFGState, sdfg: dace.SDFG) -> None:
+        
+        # Get classification of this tasklet
+        classification = tutil.classify_tasklet(state, tasklet)
+        
+        prefix = "a"
+        for edge in state.in_edges(tasklet):
+            
+            # is this edge coming out of a mapentry
+            from_map = isinstance(edge.src, dace.nodes.MapEntry)
+            
+            # calculate src
+            fp_src = edge.src
+            bias_src = edge.src if from_map else self._get_access_node(f"{edge.src.data}_bias", state)
+            scale_src = edge.src if from_map else self._get_access_node(f"{edge.src.data}_scale", state)
+
+            # calculate src connectors
+            fp_src_con = edge.src_conn if from_map else None
+            bias_src_con = f"{edge.src_conn}_bias" if from_map else None
+            scale_src_con = f"{edge.src_conn}_scale" if from_map else None
+            
+            # calculate memlets
+            fp_memlet = edge.data if from_map else sdfg.make_array_memlet(edge.src.data)
+            bias_memlet = dace.Memlet() if from_map else sdfg.make_array_memlet(f"{edge.src.data}_bias")
+            scale_memlet = dace.Memlet() if from_map else sdfg.make_array_memlet(f"{edge.src.data}_scale")
+            
+            state.add_edge(fp_src, fp_src_con, libnode, f"{prefix}_fp", fp_memlet)
+            state.add_edge(bias_src, bias_src_con, libnode, f"{prefix}_bias", bias_memlet)
+            state.add_edge(scale_src, scale_src_con, libnode, f"{prefix}_scale", scale_memlet)
+            
+            # increment prefix
+            prefix = chr(ord(prefix)+1)
+        
+        for edge in state.out_edges(tasklet):
+       
+            # is this edge coming out of a mapentry
+            to_map = isinstance(edge.dst, dace.nodes.MapExit)
+            
+            # calculate src
+            fp_dst = edge.dst
+            bias_dst = edge.dst if to_map else self._get_access_node(f"{edge.dst.data}_bias", state)
+            scale_dst = edge.dst if to_map else self._get_access_node(f"{edge.dst.data}_scale", state)
+            
+            # calculate src connectors
+            fp_dst_con = edge.dst_conn if to_map else None
+            bias_dst_con = f"{edge.dst_conn}_bias" if to_map else None
+            scale_dst_con = f"{edge.dst_conn}_scale" if to_map else None
+            
+            # calculate memlets
+            fp_memlet = edge.data if to_map else sdfg.make_array_memlet(edge.dst.data)
+            bias_memlet = dace.Memlet() if to_map else sdfg.make_array_memlet(f"{edge.dst.data}_bias")
+            scale_memlet = dace.Memlet() if to_map else sdfg.make_array_memlet(f"{edge.dst.data}_scale")
+    
+            state.add_edge(libnode, "out_fp", fp_dst, fp_dst_con, fp_memlet)
+            state.add_edge(libnode, "out_bias", bias_dst, bias_dst_con, bias_memlet)
+            state.add_edge(libnode, "out_scale", scale_dst, scale_dst_con, scale_memlet)
+    
+    
+    def _get_access_node(self, name: str, state: dace.SDFGState) -> dace.nodes.AccessNode:
+        for node in state.nodes():
+            # Check if the node is an AccessNode
+            if not isinstance(node, dace.nodes.AccessNode):
+                continue
+            if node.data == name:
+                return node
+        raise ValueError(f"Access node for '{name}' was not found")
