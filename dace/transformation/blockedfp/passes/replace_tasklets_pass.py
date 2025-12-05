@@ -1,23 +1,26 @@
 import dace
 import dace.transformation.pass_pipeline as ppl
+import dace.transformation as xf
+import dace.sdfg.tasklet_utils as tutil
+import dace.sdfg.propagation
+
 from dace.transformation.blockedfp.passes.extend_map_pass import ExtendMapPass
 import dace.transformation.blockedfp.libraries as bfplib
-import dace.transformation as xf
-from dataclasses import dataclass
-from dace.sdfg.state import StateSubgraphView
-from dace.sdfg.utils import node_path_graph
-from typing import Dict, Any, Set, List
-import dace.sdfg.tasklet_utils as tutil
 
-@dataclass(unsafe_hash=True)
-class ExtendTaskletsPass(ppl.Pass):
+from typing import List
+
+
+# This pass is pretty huge and does multiple steps:
+#   1. It extends the maps with the connections from the auxiliary arrays
+#   2. It replaces every tasklet with a library node
+#   3. It connects up all the library nodes
+#   4. It expands all the library nodes
+class ReplaceTaskletsPass(ppl.Pass):
     
-    def __init__(self, names: List[str]):
-        self._names = names
-    
-    # this pass has to run after the add scale/bias step
-    def depends_on(self) -> Set[ppl.Pass]:
-        return {ExtendMapPass}
+    def __init__(self, names: List[str], blocking_factor: int = 16):
+        
+        self.__names = names
+        self.__blocking_factor = blocking_factor
     
     def modifies(self) -> ppl.Modifies:
         return ppl.Modifies.Everything
@@ -25,31 +28,34 @@ class ExtendTaskletsPass(ppl.Pass):
     def should_reapply(self, _) -> bool:
         return False
     
-    def apply_pass(self, sdfg: dace.SDFG, _: Dict[str, Any]):
-        sdfg.apply_transformations(ExtendTaskletsTransform, options={"names": self._names}, validate=False)
+    def apply_pass(self, sdfg: dace.SDFG, _) -> None:
+        
+        ExtendMapPass(self.__names).apply_pass(sdfg, {})
+        sdfg.apply_transformations(ReplaceTaskletsTransform, options={"names": self.__names, "blocking_factor": self.__blocking_factor}, validate=False)
+        sdfg.expand_library_nodes()
 
-
-class ExtendTaskletsTransform(xf.SingleStateTransformation):
+class ReplaceTaskletsTransform(xf.SingleStateTransformation):
     
     map_entry = xf.PatternNode(dace.nodes.MapEntry)
     tasklet = xf.PatternNode(dace.nodes.Tasklet)
     
-    def __init__(self, names: List[str]):
-        self._names = names
+    def __init__(self, names: List[str], blocking_factor: int = 16):
+        self.__names = [f"{name}_fp" for name in names]
+        self.__blocking_factor = blocking_factor
     
     @classmethod
-    def expressions(cls) -> List[StateSubgraphView]:
-        return [node_path_graph(cls.map_entry, cls.tasklet)]
+    def expressions(cls) -> List[dace.sdfg.state.StateSubgraphView]:
+        return [dace.sdfg.utils.node_path_graph(cls.map_entry, cls.tasklet)]
     
     def can_be_applied(self, graph: dace.SDFGState, expr_index: int, sdfg: dace.SDFG, permissive = False) -> bool:
         
         # Check if map reads from one of our arrays
         for edge in graph.in_edges(self.map_entry):
-            if edge.data.data in self._names:
+            if edge.data.data in self.__names:
                 return True
         # Check if map writes to one of our arrays
         for edge in graph.out_edges(graph.exit_node(self.map_entry)):
-            if edge.data.data in self._names:
+            if edge.data.data in self.__names:
                 return True
         
         return False
@@ -60,18 +66,18 @@ class ExtendTaskletsTransform(xf.SingleStateTransformation):
         # Extend the intermediate access nodes
         for node in graph.all_nodes_between(self.map_entry, map_exit):
             if isinstance(node, dace.nodes.AccessNode):
-                self._extend_access_node(node, graph, sdfg)
+                self.__extend_access_node(node, graph, sdfg)
         
         # Now iterate through all tasklets, change them to a sick new library node, and connect things up
         for node in graph.all_nodes_between(self.map_entry, map_exit):
             if isinstance(node, dace.nodes.Tasklet):
-                self._extend_tasklet(node, graph, sdfg)
-        
+                self.__extend_tasklet(node, graph, sdfg)
+                
         # Now iterate through all tasklets again and kill them
         for node in graph.all_nodes_between(self.map_entry, map_exit):
             if isinstance(node, dace.nodes.Tasklet):
                 graph.remove_node(node)
-        
+
         # directly connect outer map to first libnode now
         for in_edge in graph.in_edges(self.map_entry):
             for out_edge in graph.out_edges(self.map_entry):
@@ -81,26 +87,35 @@ class ExtendTaskletsTransform(xf.SingleStateTransformation):
                 
                 # directly connect outer map over inner map
                 graph.add_edge(in_edge.src, in_edge.src_conn, out_edge.dst, out_edge.dst_conn, in_edge.data)
-                
+          
         for in_edge in graph.in_edges(map_exit):
             for out_edge in graph.out_edges(map_exit):
                 # Ugly check if the connectors are supposed to be the same
                 if in_edge.dst_conn[3:] != out_edge.src_conn[4:]:
                     continue
-                
                 # directly connect outer map over inner map
-                graph.add_edge(in_edge.src, in_edge.src_conn, out_edge.dst, out_edge.dst_conn, out_edge.data)
-        
-        graph.remove_node(self.map_entry)
-        graph.remove_node(map_exit)
+                expr = str(out_edge.data)
+                expr = expr.replace("31/16", "1")
+                expr = expr.replace("\n", "").replace(" ", "")
+
+                #graph.add_edge(in_edge.src, in_edge.src_conn, out_edge.dst, out_edge.dst_conn, out_edge.data)
+                graph.add_edge(in_edge.src, in_edge.src_conn, out_edge.dst, out_edge.dst_conn, dace.Memlet(expr))
+
+        # Remove inner map
+        graph.remove_nodes_from([self.map_entry, map_exit])
+        dace.sdfg.propagation.propagate_memlets_state(sdfg, graph)
     
-    def _extend_access_node(self, node: dace.nodes.AccessNode, state: dace.SDFGState, sdfg: dace.SDFG) -> None:
+    def __extend_access_node(self, node: dace.nodes.AccessNode, state: dace.SDFGState, sdfg: dace.SDFG) -> None:
         # Get the name of the array
         name = node.data
         
         # Change fp type and shape
-        sdfg.arrays[name].dtype = dace.dtypes.float16
-        sdfg.arrays[name].shape = (16,) # TODO: CHANGE THIS FOR MULTIDIMENSIONAL THINGS!!!
+        data_desc = sdfg.arrays[name]
+        sdfg.remove_data(name, validate=False)
+        sdfg.add_array(name, (16,), dtype=dace.float32, storage=data_desc.storage, location=data_desc.location, lifetime=data_desc.lifetime, transient=data_desc.transient)
+        #sdfg.arrays[name].dtype = dace.dtypes.float32
+        # very ugly crude approcimation for a block
+        #sdfg.arrays[name].shape = sdfg.arrays[self.__names[0]].shape[(len(sdfg.arrays[self.__names[0]].shape) // 2):]
         
         # Add new arrays
         sdfg.add_array(f"{name}_bias", shape=(1,), dtype=dace.dtypes.float64, transient=True)
@@ -111,13 +126,13 @@ class ExtendTaskletsTransform(xf.SingleStateTransformation):
         state.add_access(f"{name}_scale")
         
         # Add name to array
-        self._names.append(name)
+        self.__names.append(name)
     
-    def _extend_tasklet(self, tasklet: dace.nodes.Tasklet, state: dace.SDFGState, sdfg: dace.SDFG) -> None:
-        
+    def __extend_tasklet(self, tasklet: dace.nodes.Tasklet, state: dace.SDFGState, sdfg: dace.SDFG) -> None:
+     
         # Get classification of this tasklet
         classification = tutil.classify_tasklet(state, tasklet)
-        
+     
         # Find corresponding library node and add it
         if classification["type"] is tutil.TaskletType.ARRAY_ARRAY or classification["type"] is tutil.TaskletType.ARRAY_SCALAR or classification["type"] is tutil.TaskletType.SCALAR_ARRAY or classification["type"] is tutil.TaskletType.SCALAR_SCALAR:
             match classification["op"]:
@@ -139,14 +154,14 @@ class ExtendTaskletsTransform(xf.SingleStateTransformation):
             libnode = bfplib.BFPAssignScalarNode(tasklet.name)
         else:
             raise ValueError(f"WHAT THE FUCK AM I SEEING, {classification['type']}")
-        
+
         # Add new libnode
         state.add_node(libnode)
-        
+
         # Connect libnode
-        self._connect_libnodes(tasklet, libnode, state, sdfg)
+        self.__connect_libnodes(tasklet, libnode, state, sdfg)
     
-    def _connect_libnodes(self, tasklet: dace.nodes.Tasklet, libnode: dace.nodes.LibraryNode, state: dace.SDFGState, sdfg: dace.SDFG) -> None:
+    def __connect_libnodes(self, tasklet: dace.nodes.Tasklet, libnode: dace.nodes.LibraryNode, state: dace.SDFGState, sdfg: dace.SDFG) -> None:
         
         # Get classification of this tasklet
         classification = tutil.classify_tasklet(state, tasklet)
@@ -159,13 +174,13 @@ class ExtendTaskletsTransform(xf.SingleStateTransformation):
             
             # calculate src
             fp_src = edge.src
-            bias_src = edge.src if from_map else self._get_access_node(f"{edge.src.data}_bias", state)
-            scale_src = edge.src if from_map else self._get_access_node(f"{edge.src.data}_scale", state)
+            bias_src = edge.src if from_map else self.__get_access_node(f"{edge.src.data}_bias", state)
+            scale_src = edge.src if from_map else self.__get_access_node(f"{edge.src.data}_scale", state)
 
             # calculate src connectors
             fp_src_con = edge.src_conn if from_map else None
-            bias_src_con = f"{edge.src_conn}_bias" if from_map else None
-            scale_src_con = f"{edge.src_conn}_scale" if from_map else None
+            bias_src_con = f"{edge.src_conn[:-3]}_bias" if from_map else None
+            scale_src_con = f"{edge.src_conn[:-3]}_scale" if from_map else None
             
             # calculate memlets
             fp_memlet = edge.data if from_map else sdfg.make_array_memlet(edge.src.data)
@@ -186,13 +201,13 @@ class ExtendTaskletsTransform(xf.SingleStateTransformation):
             
             # calculate src
             fp_dst = edge.dst
-            bias_dst = edge.dst if to_map else self._get_access_node(f"{edge.dst.data}_bias", state)
-            scale_dst = edge.dst if to_map else self._get_access_node(f"{edge.dst.data}_scale", state)
+            bias_dst = edge.dst if to_map else self.__get_access_node(f"{edge.dst.data}_bias", state)
+            scale_dst = edge.dst if to_map else self.__get_access_node(f"{edge.dst.data}_scale", state)
             
             # calculate src connectors
             fp_dst_con = edge.dst_conn if to_map else None
-            bias_dst_con = f"{edge.dst_conn}_bias" if to_map else None
-            scale_dst_con = f"{edge.dst_conn}_scale" if to_map else None
+            bias_dst_con = f"{edge.dst_conn[:-3]}_bias" if to_map else None
+            scale_dst_con = f"{edge.dst_conn[:-3]}_scale" if to_map else None
             
             # calculate memlets
             fp_memlet = edge.data if to_map else sdfg.make_array_memlet(edge.dst.data)
@@ -203,8 +218,7 @@ class ExtendTaskletsTransform(xf.SingleStateTransformation):
             state.add_edge(libnode, "out_bias", bias_dst, bias_dst_con, bias_memlet)
             state.add_edge(libnode, "out_scale", scale_dst, scale_dst_con, scale_memlet)
     
-    
-    def _get_access_node(self, name: str, state: dace.SDFGState) -> dace.nodes.AccessNode:
+    def __get_access_node(self, name: str, state: dace.SDFGState) -> dace.nodes.AccessNode:
         for node in state.nodes():
             # Check if the node is an AccessNode
             if not isinstance(node, dace.nodes.AccessNode):

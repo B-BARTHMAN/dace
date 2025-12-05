@@ -12,9 +12,6 @@ from sympy import simplify
 
 @dataclass(unsafe_hash=True)
 class SplitDimensions(ppl.Pass):
-    
-    def depends_on(self) -> Set[ppl.Pass]:
-        return {MapTilingPass}
 
     def _block_maps():
         pass

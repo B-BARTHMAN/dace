@@ -1,44 +1,44 @@
 import dace
 from typing import List
-from dace.transformation import Pipeline, Pass
+import dace.transformation.pass_pipeline as ppl
+
+from dace.transformation.blockedfp.passes.add_new_arrays_pass import AddNewArraysPass
 from dace.transformation.blockedfp.passes.map_tiling_pass import MapTilingPass
-from dace.transformation.layout.split_dimension import SplitDimensions
-from dace.transformation.passes.split_tasklets import SplitTasklets
-from dace.transformation.blockedfp.passes.add_scale_bias_pass import AddScaleBias
-from dace.transformation.blockedfp.passes.change_fp_type_pass import ChangeFPType
-from dace.transformation.blockedfp.passes.extend_map_pass import ExtendMapPass
-from dace.transformation.blockedfp.passes.extend_tasklets_pass import ExtendTaskletsPass
-#from dace.transformation.blockedfp.passes.replace_tasklets_pass import ReplaceTaskletsPass
+from dace.transformation.blockedfp.passes.split_dimensions_pass import SplitDimensionsPass
+from dace.transformation.blockedfp.passes.add_auxiliary_arrays_pass import AddAuxiliaryArraysPass
+from dace.transformation.blockedfp.passes.split_tasklets_pass import SplitTaskletsPass
+from dace.transformation.blockedfp.passes.replace_tasklets_pass import ReplaceTaskletsPass
+from dace.transformation.blockedfp.passes.cast_in_out_pass import CastInOutPass
 
-from typing import List
-
-class BlockedFP(Pipeline):
+class BlockedFP(ppl.Pass):
     """
-    A pipeline that transforms a given array into a blocked floating point format
+    A pass that transforms a given array into a blocked floating point format
     """
     
-    def __init__(self, names: List[str], block_size: List[int]):
+    def __init__(self, names: List[str], blocking_factor: int = 16):
         
-        self._names = names
-        
-        if not block_size:
-            raise ValueError("block_size must contain at least one dimension!")
-        
-        self._block_size = block_size
-        
-        split_map = {
-            name: ([True for _ in block_size], block_size) for name in names
-        }
-        
-        passes: list[Pass] = [
-            MapTilingPass(names=names),
-            SplitDimensions(split_map=split_map),
-            SplitTasklets(),
-            AddScaleBias(names=names, block_size=block_size),
-            ChangeFPType(names=names),
-            ExtendMapPass(names=names),
-            ExtendTaskletsPass(names=names),
-            #ReplaceTaskletsPass(name=name),
-        ]
-        
-        super().__init__(passes=passes)
+        self.__names = names
+        self.__blocking_factor = blocking_factor
+    
+    def modifies(self) -> ppl.Modifies:
+        return ppl.Modifies.Everything
+    
+    def should_reapply(self, _) -> bool:
+        return False
+    
+    def apply_pass(self, sdfg: dace.SDFG, _) -> None:
+        # Run AddNewArrays Pass
+        AddNewArraysPass(self.__names, self.__blocking_factor).apply_pass(sdfg, {})
+        # Run MapTiling Pass
+        MapTilingPass(self.__names, self.__blocking_factor).apply_pass(sdfg, {})
+        # Run SplitDimensions Pass
+        SplitDimensionsPass(self.__names, self.__blocking_factor).apply_pass(sdfg, {})
+        # Run AddAuxiliaryArrays Pass
+        AddAuxiliaryArraysPass(self.__names, self.__blocking_factor).apply_pass(sdfg, {})
+        # Run SplitTasklets Pass
+        SplitTaskletsPass().apply_pass(sdfg, {})
+        # Run ReplaceTasklets Pass
+        ReplaceTaskletsPass(self.__names, self.__blocking_factor).apply_pass(sdfg, {})
+        # Run CastInOutPass
+        CastInOutPass(self.__names).apply_pass(sdfg, {})
+        sdfg.simplify()

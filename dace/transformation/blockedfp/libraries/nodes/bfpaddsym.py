@@ -1,19 +1,53 @@
 import dace
 from dace.transformation.transformation import ExpandTransformation
 
+@dace.program
+def bfpaddsym(a_scale: dace.float64[1], a_bias: dace.float64[1], a_fp: dace.float32[16], out_scale: dace.float64[1], out_bias: dace.float64[1], out_fp: dace.float32[16], other):
+    # Dequantize
+    a_val = a_scale[0] * a_fp[:] + a_bias[0]
+
+    # Add
+    out_val = a_val[:] + other
+
+    # Compute output bias and scale (block floating-point normalization)
+    bias_val = 0.
+    for i in dace.map[0:16] @ dace.ScheduleType.Sequential:
+        bias_val += out_val[i] / 16.0
+    scale_val = 1.
+    for i in dace.map[0:16] @ dace.ScheduleType.Sequential:
+        diff = out_val[i] - bias_val
+        diff = abs(diff)
+        scale_val = max(scale_val, diff)
+
+    # Write back to outputs (important!)
+    out_bias[0] = bias_val
+    out_scale[0] = scale_val
+
+    # Quantize back
+    out_fp[:] = (out_val[:] - bias_val) / scale_val
+
 @dace.library.expansion
 class ExpandBFPAddSymNode(ExpandTransformation):
     environments = []
     
     @staticmethod
     def expansion(node: "BFPAddSymNode", parent_state: dace.SDFGState, parent_sdfg: dace.SDFGState) -> dace.nodes.Tasklet:
-        code = "out_fp = a_fp"
-        return dace.nodes.Tasklet(
-            node.name,
-            node.in_connectors,
-            node.out_connectors,
-            code
+        
+        a_scale = parent_sdfg.arrays[next(e.data.data for e in parent_state.in_edges(node) if e.dst_conn == "a_scale")]
+        a_bias  = parent_sdfg.arrays[next(e.data.data for e in parent_state.in_edges(node) if e.dst_conn == "a_bias")]
+        a_fp    = parent_sdfg.arrays[next(e.data.data for e in parent_state.in_edges(node) if e.dst_conn == "a_fp")]
+
+        out_scale = parent_sdfg.arrays[next(e.data.data for e in parent_state.out_edges(node) if e.src_conn == "out_scale")]
+        out_bias  = parent_sdfg.arrays[next(e.data.data for e in parent_state.out_edges(node) if e.src_conn == "out_bias")]
+        out_fp    = parent_sdfg.arrays[next(e.data.data for e in parent_state.out_edges(node) if e.src_conn == "out_fp")]
+        
+        assert all([a_scale, a_bias, a_fp, out_scale, out_bias, out_fp])
+        
+        sdfg = bfpaddsym.to_sdfg(
+            a_scale, a_bias, a_fp, out_scale, out_bias, out_fp, node.value
         )
+        sdfg.simplify()
+        return sdfg
         
 
 @dace.library.node
@@ -25,5 +59,5 @@ class BFPAddSymNode(dace.sdfg.nodes.LibraryNode):
     default_implementation = 'pure'
     
     def __init__(self, name, value: float):
-        self._value = value
+        self.value = value
         super().__init__(name, inputs={"a_scale", "a_bias", "a_fp"}, outputs={"out_scale", "out_bias", "out_fp"})

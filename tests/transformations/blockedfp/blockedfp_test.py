@@ -1,32 +1,39 @@
 import dace
+import numpy as np
 
 from dace.transformation.blockedfp.blockedfp import BlockedFP
 
-def visualize_program(prgm, arrays):
+N = dace.symbol('N')
+
+def vec_add(A: dace.float64[N], B: dace.float64[N], C: dace.float64[N]):
+        for i in dace.map[0:N]:
+            C[i] = A[i] + B[i]
+
+def test_vec_add():
+    # Get sdfg and transform
+    sdfg = dace.program(vec_add).to_sdfg()
+    BlockedFP(["A", "B", "C"]).apply_pass(sdfg, {})
     
-    sdfg: dace.SDFG = prgm.to_sdfg()
-    sdfg.view()
-    
-    BlockedFP(arrays, [16]).apply_pass(sdfg, {})
+    # Validate and compile
     sdfg.validate()
-    
+    compiled = sdfg.compile()
     sdfg.view()
     
-N = dace.symbol("N")
+    # Create arrays to test
+    A = np.arange(512, dtype=np.float64)
+    B = np.arange(511, -1, -1, dtype=np.float64)
+    C = np.zeros_like(A)
+    
+    A_copy = np.copy(A)
+    B_copy = np.copy(B)
+    C_copy = np.copy(C)
+    
+    # Compute Expected result and actual result
+    #vec_add(A, B, C)
+    compiled(A_copy, B_copy, C_copy, N=512)
+    
+    print(C_copy)
+    
 
-@dace.program
-def vadd(A: dace.float64[N], B: dace.float64[N], C: dace.float64[N]):
-    for i in dace.map[0:N] @ dace.ScheduleType.Sequential:
-        C[i] = 0.5 * (A[i] + B[i])
 
-@dace.program
-def write_program(A: dace.float64[N], B: dace.float64[N]):
-    for i in dace.map[0:N-1] @ dace.ScheduleType.Sequential:
-        A[i] = B[i+1]
-
-@dace.program
-def vmult(A: dace.float64[N], B: dace.float64[N], C: dace.float64):
-    for i in dace.map[0:N//2] @ dace.ScheduleType.Sequential:
-        C[i] = 0.5*(A[i] * B[i] + 0.5 * C[i])
-
-visualize_program(vmult, ["A", "B", "C"])
+test_vec_add()
