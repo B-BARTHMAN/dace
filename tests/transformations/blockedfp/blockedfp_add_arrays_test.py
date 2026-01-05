@@ -32,4 +32,4 @@ def test_add_new_arrays():
         # Run conditions
         add_new_arrays_condition(sdfg, arrays)
 
-test_add_new_arrays()
+#test_add_new_arrays()

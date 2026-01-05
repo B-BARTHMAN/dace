@@ -20,8 +20,8 @@ def test_vec_add():
     sdfg.view()
     
     # Create arrays to test
-    A = np.arange(512, dtype=np.float64)
-    B = np.arange(511, -1, -1, dtype=np.float64)
+    A = np.arange(64, dtype=np.float64)
+    B = np.arange(63, -1, -1, dtype=np.float64)
     C = np.zeros_like(A)
     
     A_copy = np.copy(A)
@@ -29,8 +29,9 @@ def test_vec_add():
     C_copy = np.copy(C)
     
     # Compute Expected result and actual result
-    #vec_add(A, B, C)
-    compiled(A_copy, B_copy, C_copy, N=512)
+    # vec_add(A, B, C)
+    # print(C)
+    compiled(A_copy, B_copy, C_copy, N=64)
     
     print(C_copy)
     

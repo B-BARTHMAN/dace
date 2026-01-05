@@ -41,4 +41,4 @@ class BlockedFP(ppl.Pass):
         ReplaceTaskletsPass(self.__names, self.__blocking_factor).apply_pass(sdfg, {})
         # Run CastInOutPass
         CastInOutPass(self.__names).apply_pass(sdfg, {})
-        sdfg.simplify()
+        #sdfg.simplify()
