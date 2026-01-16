@@ -17,22 +17,7 @@ def blockedfp_transform_state(
     # Map Tiling
     tile_maps(sdfg, state, array_names, blocking_factor)
     
-    sdfg.apply_transformations(ExtendMapTransform, options={"names": array_names, "blocking_factor": blocking_factor}, validate=False)
-    
-    # Add new arrays for all transient arrays
-    #blockedfp_extend_transient(sdfg, state, blocking_factor)
-    
-    """
-    # Add new nodes
-    access_nodes: Dict[dace.nodes.AccessNode, Tuple[dace.nodes.AccessNode, dace.nodes.AccessNode, dace.nodes.AccessNode]] = {}
-    library_nodes: Dict[dace.nodes.Tasklet, dace.nodes.LibraryNode] = {}
-    for node in state.nodes():
-        if isinstance(node, dace.nodes.AccessNode):
-            blockedfp_extend_transient(sdfg, state, node, 16)
-            access_nodes[node] = add_access(state, node)
-        elif isinstance(node, dace.nodes.Tasklet):
-            library_nodes[node] = add_lib(state, node)
-    """
+    sdfg.apply_transformations(ExtendMapTransform, options={"names": array_names, "blocking_factor": blocking_factor}, validate=True)
 
 
 class ExtendMapTransform(xf.SingleStateTransformation):
@@ -62,10 +47,6 @@ class ExtendMapTransform(xf.SingleStateTransformation):
     
     def apply(self, state: dace.SDFGState, sdfg: dace.SDFG) -> None:
         indices = self.inner_map_entry.map.params
-        inner_range = self.inner_map_entry.map.range
-        inner_map = dict(zip(indices, inner_range))
-        inner_map_block = dict(zip(indices, inner_range))
-        print(inner_range)
         
         # Extend all access nodes and tasklets
         access_nodes: Dict[dace.nodes.AccessNode, Tuple[dace.nodes.AccessNode, dace.nodes.AccessNode, dace.nodes.AccessNode]] = {}
@@ -91,30 +72,147 @@ class ExtendMapTransform(xf.SingleStateTransformation):
                     state.add_edge(fp, None, libnode, f"{prefix}_fp", sdfg.make_array_memlet(fp.data))
                     state.add_edge(scale, None, libnode, f"{prefix}_scale", sdfg.make_array_memlet(scale.data))
                     state.add_edge(bias, None, libnode, f"{prefix}_bias", sdfg.make_array_memlet(bias.data))
-                # Map Entry
-                elif isinstance(edge.src, dace.nodes.MapEntry):
-                    if not edge.src == self.inner_map_entry:
-                        raise ValueError("Weird connection happened")
-                    
-                    subset = dace.subsets.Range([
-                        inner_map[str(r[0])] for r in edge.data.subset.ranges
-                    ])
-                    
-                    state.add_edge(self.outer_map_entry, f"OUT_{edge.data.data}_fp", libnode, f"{prefix}_fp", dace.Memlet(
-                        data=f"{edge.data.data}_fp",
-                        subset=subset
-                        ))
-                    state.add_edge(self.outer_map_entry, f"OUT_{edge.data.data}_scale", libnode, f"{prefix}_scale", dace.Memlet())
-                    state.add_edge(self.outer_map_entry, f"OUT_{edge.data.data}_bias", libnode, f"{prefix}_bias", dace.Memlet())
                 prefix = chr(ord(prefix) + 1)
             
             for edge in state.out_edges(tasklet):
+                ## Access Nodes
                 if isinstance(edge.dst, dace.nodes.AccessNode):
                     fp, scale, bias = access_nodes[edge.dst]
                     state.add_edge(libnode, f"out_fp", fp, None, sdfg.make_array_memlet(fp.data))
                     state.add_edge(libnode, f"out_scale", scale, None, sdfg.make_array_memlet(scale.data))
                     state.add_edge(libnode, f"out_bias", bias, None, sdfg.make_array_memlet(bias.data))
-
+        
+        # Connect Inner Maps Entry
+        prefix = 'a'
+        for edge_in in state.in_edges(self.inner_map_entry):
+            for edge_out in state.out_edges(self.inner_map_entry):
+                # Check if edges match
+                if edge_in.data.data != edge_out.data.data:
+                    continue
+                # Check if this edge is a blockedfp
+                if edge_in.data.data not in self.__names:
+                    continue
+                
+                # Check if it writes to a tasklet
+                if not isinstance(edge_out.dst, dace.nodes.Tasklet):
+                    raise ValueError("Inner map is not writing to a tasklet")
+                libnode = tasklet_nodes[edge_out.dst]
+                
+                # Get block access
+                subset: dace.subsets.Range = edge_in.data.subset
+                block_subset = dace.subsets.Range([
+                    [
+                        dace.symbolic.SymExpr(f"int_ceil({tup[0]}, {self.__blocking_factor})"),
+                        dace.symbolic.SymExpr(f"int_ceil({tup[1]}, {self.__blocking_factor})"),
+                        1
+                    ] for tup in subset.ranges
+                ])
+                
+                # Add connections
+                state.add_edge(edge_in.src, f"{edge_in.src_conn}_fp", libnode, f"{prefix}_fp", dace.Memlet(data=f"{edge_in.data.data}_fp", subset=subset))
+                state.add_edge(edge_in.src, f"{edge_in.src_conn}_bias", libnode, f"{prefix}_bias", dace.Memlet(data=f"{edge_in.data.data}_bias", subset=block_subset))
+                state.add_edge(edge_in.src, f"{edge_in.src_conn}_scale", libnode, f"{prefix}_scale", dace.Memlet(data=f"{edge_in.data.data}_scale", subset=block_subset))
+                
+                prefix = chr(ord(prefix) + 1)
+        
+        # Connect Inner Maps Exit
+        for edge_in in state.in_edges(state.exit_node(self.inner_map_entry)):
+            for edge_out in state.out_edges(state.exit_node(self.inner_map_entry)):
+                # Check if edges match
+                if edge_in.data.data != edge_out.data.data:
+                    continue
+                # Check if this edge is a blockedfp
+                if edge_in.data.data not in self.__names:
+                    continue
+                
+                # Check if it writes from a tasklet
+                if not isinstance(edge_in.src, dace.nodes.Tasklet):
+                    raise ValueError("Inner map is not writing from a tasklet")
+                libnode = tasklet_nodes[edge_in.src]
+                
+                # Get block access
+                subset: dace.subsets.Range = edge_out.data.subset
+                block_subset = dace.subsets.Range([
+                    [
+                        dace.symbolic.SymExpr(f"int_ceil({tup[0]}, {self.__blocking_factor})"),
+                        dace.symbolic.SymExpr(f"int_ceil({tup[1]}, {self.__blocking_factor})"),
+                        1
+                    ] for tup in subset.ranges
+                ])
+                
+                # Add connections
+                state.add_edge(libnode, "out_fp", edge_out.dst, f"{edge_out.dst_conn}_fp", dace.Memlet(data=f"{edge_out.data.data}_fp", subset=subset))
+                state.add_edge(libnode, "out_bias", edge_out.dst, f"{edge_out.dst_conn}_bias", dace.Memlet(data=f"{edge_out.data.data}_bias", subset=block_subset))
+                state.add_edge(libnode, "out_scale", edge_out.dst, f"{edge_out.dst_conn}_scale", dace.Memlet(data=f"{edge_out.data.data}_scale", subset=block_subset))
+        
+        # Delete connectors from outer maps
+        for conn in list(self.outer_map_entry.in_connectors):
+            self.outer_map_entry.remove_in_connector(conn)
+        for conn in list(self.outer_map_entry.out_connectors):
+            self.outer_map_entry.remove_out_connector(conn)
+        for conn in list(state.exit_node(self.outer_map_entry).in_connectors):
+            state.exit_node(self.outer_map_entry).remove_in_connector(conn)
+        for conn in list(state.exit_node(self.outer_map_entry).out_connectors):
+            state.exit_node(self.outer_map_entry).remove_out_connector(conn)
+        
+        # Add connectors back to map entry
+        for out_edge in state.out_edges(self.outer_map_entry):
+            if out_edge.data.data.endswith("_fp") or out_edge.data.data.endswith("_bias") or out_edge.data.data.endswith("_scale"):
+                conn = out_edge.src_conn
+                self.outer_map_entry.add_out_connector(conn)
+                self.outer_map_entry.add_in_connector(conn.replace("OUT", "IN"))
+        
+        # Add connectors back to map exit
+        for in_edge in state.in_edges(state.exit_node(self.outer_map_entry)):
+            if in_edge.data.data.endswith("_fp") or in_edge.data.data.endswith("_bias") or in_edge.data.data.endswith("_scale"):
+                conn = in_edge.dst_conn
+                state.exit_node(self.outer_map_entry).add_in_connector(conn)
+                state.exit_node(self.outer_map_entry).add_out_connector(conn.replace("IN", "OUT"))
+        
+        # Rewire Input
+        nodes_to_remove = list(state.all_nodes_between(self.inner_map_entry, state.exit_node(self.inner_map_entry)))
+        for in_edge in state.in_edges(self.outer_map_entry):
+            # Check if input is from access node
+            if not isinstance(in_edge.src, dace.nodes.AccessNode):
+                raise ValueError("Map doesn't read from access node")
+            
+            subset: dace.subsets.Range = in_edge.data.subset
+            
+            access_fp = state.add_access(f"{in_edge.data.data}_fp")
+            access_bias = state.add_access(f"{in_edge.data.data}_bias")
+            access_scale = state.add_access(f"{in_edge.data.data}_scale")
+            state.add_edge(access_fp, None, self.outer_map_entry, f"IN_{in_edge.data.data}_fp", dace.Memlet(data=f"{in_edge.data.data}_fp", subset=subset))
+            state.add_edge(access_bias, None, self.outer_map_entry, f"IN_{in_edge.data.data}_bias", sdfg.make_array_memlet(f"{in_edge.data.data}_bias"))
+            state.add_edge(access_scale, None, self.outer_map_entry, f"IN_{in_edge.data.data}_scale", sdfg.make_array_memlet(f"{in_edge.data.data}_scale"))
+            
+            nodes_to_remove.append(in_edge.src)
+        
+        # Rewire Output
+        for out_edge in state.out_edges(state.exit_node(self.outer_map_entry)):
+            # Check if output is to a access node
+            if not isinstance(out_edge.dst, dace.nodes.AccessNode):
+                raise ValueError("Map doesn't write to access node")
+            
+            subset: dace.subsets.Range = out_edge.data.subset
+            
+            access_fp = state.add_access(f"{out_edge.data.data}_fp")
+            access_bias = state.add_access(f"{out_edge.data.data}_bias")
+            access_scale = state.add_access(f"{out_edge.data.data}_scale")
+            state.add_edge(state.exit_node(self.outer_map_entry), f"OUT_{out_edge.data.data}_fp", access_fp, None, dace.Memlet(data=f"{out_edge.data.data}_fp", subset=subset))
+            state.add_edge(state.exit_node(self.outer_map_entry), f"OUT_{out_edge.data.data}_bias", access_bias, None, sdfg.make_array_memlet(f"{out_edge.data.data}_bias"))
+            state.add_edge(state.exit_node(self.outer_map_entry), f"OUT_{out_edge.data.data}_scale", access_scale, None, sdfg.make_array_memlet(f"{out_edge.data.data}_scale"))
+            
+            nodes_to_remove.append(out_edge.dst)
+        
+        # Delete Inner Maps
+        nodes_to_remove.append(self.inner_map_entry)
+        nodes_to_remove.append(state.exit_node(self.inner_map_entry))
+        state.remove_nodes_from(nodes_to_remove)
+        
+                
+                
+            
+            
 
 def tile_maps(
     sdfg: dace.SDFG,

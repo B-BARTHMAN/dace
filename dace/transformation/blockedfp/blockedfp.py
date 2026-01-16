@@ -23,12 +23,13 @@ def blocked_fp(sdfg: dace.SDFG, array_names: List[str], blocking_factor: int = 1
 
 N = dace.symbol("N")
 @dace.program
-def foo(A: dace.float32[16*N, 16*N], B: dace.float32[16*N, 16*N], C: dace.float32[16*N, 16*N]):
-    for i, j in dace.map[0:16*N, 0:16*N]:
-        C[i, j] = A[i, j] + B[i, j]
+def foo(A: dace.float32[16*N], B: dace.float32[16*N], C: dace.float32[16*N]):
+    for i in dace.map[0:16*N]:
+        C[i] = A[i] + B[i]
 
 sdfg = foo.to_sdfg(simplify=True)
 blocked_fp(sdfg, ["A", "B", "C"])
-#sdfg.validate()
+sdfg.expand_library_nodes()
+sdfg.validate()
 sdfg.view()
-#sdfg.compile()
+sdfg.compile()
