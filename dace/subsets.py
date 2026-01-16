@@ -1,4 +1,4 @@
-# Copyright 2019-2021 ETH Zurich and the DaCe authors. All rights reserved.
+# Copyright 2019-2025 ETH Zurich and the DaCe authors. All rights reserved.
 import dace.serialize
 from dace import data, symbolic, dtypes
 import re
@@ -32,7 +32,7 @@ def bounding_box_cover_exact(subset_a, subset_b, approximation=False) -> bool:
     and `False` otherwise.
 
     :param subset_a: The first subset, the one that should cover.
-    :param subset_b: The second subset, the one that should be convered.
+    :param subset_b: The second subset, the one that should be covered.
     :param approximation: If `True` then use the approximated bounds.
     """
     min_elements_a = subset_a.min_element_approx() if approximation else subset_a.min_element()
@@ -73,7 +73,7 @@ def bounding_box_symbolic_positive(subset_a, subset_b, approximation=False) -> b
     and `False` otherwise.
 
     :param subset_a: The first subset, the one that should cover.
-    :param subset_b: The second subset, the one that should be convered.
+    :param subset_b: The second subset, the one that should be covered.
     :param approximation: If `True` then use the approximated bounds.
 
     :note: In previous versions this function raised `TypeError` in some cases
@@ -646,7 +646,7 @@ class Range(Subset):
                 # Open parenthesis found, increase count by 1
                 if token[i] == '(':
                     count += 1
-                # Closing parenthesis found, decrease cound by 1
+                # Closing parenthesis found, decrease count by 1
                 elif token[i] == ')':
                     count -= 1
                 # Move to the next character
@@ -929,6 +929,51 @@ class Range(Subset):
         if type_error:
             raise TypeError("cannot determine truth value of Relational")
 
+        return True
+
+    def is_contiguous_subset(self, array: 'dace.data.Array') -> bool:
+        """
+        Check if this subset represents a contiguous subset of the array descriptor provided.
+
+        For a subset to be contiguous:
+        - In Fortran layout: once a dimension is partial, all subsequent dimensions must have length 1
+        - In C layout: same rule applies after reversing dimensions
+
+        Args:
+            array: array descriptor to check against
+
+        Returns:
+            True if the subset is contiguous, False otherwise
+            Returns False on all arrays that are not have a packed layout,
+            meaning that the complete array is contiguously stored in 1D memory.
+        """
+        # Any step size != 1 -> not contiguous
+        if any(s != 1 for (_, _, s) in self):
+            return False
+
+        # Determine array layout and calculate expression lengths accordingly
+        if array.is_packed_fortran_strides():
+            # Fortran layout: first dimension varies fastest
+            expr_lens = [((e + 1) - b) for (b, e, s) in self]
+            shape_dims = array.shape
+        elif array.is_packed_c_strides():
+            # C layout: last dimension varies fastest, so reverse the order
+            expr_lens = list(reversed([((e + 1) - b) for (b, e, s) in self]))
+            shape_dims = list(reversed(array.shape))
+        else:
+            return False
+
+        # Check contiguity: once we find a partial dimension, all remaining must be length 1
+        for i, (expr_len, dim) in enumerate(zip(expr_lens, shape_dims)):
+            # Check if this dimension is partial (less than full shape)
+            if expr_len != dim:
+                # This dimension is partial - all remaining dimensions must be length 1
+                if any(expr_len != 1 for expr_len in expr_lens[i + 1:]):
+                    return False
+                # All remaining dimensions are 1, so this is contiguous
+                return True
+
+        # All dimensions are full size - this is contiguous
         return True
 
 
@@ -1222,7 +1267,7 @@ class SubsetUnion(Subset):
 
         if isinstance(other, SubsetUnion):
             for subset in self.subset_list:
-                # check if ther is a subset in self that covers every subset in other
+                # check if there is a subset in self that covers every subset in other
                 if all(subset.covers(s) for s in other.subset_list):
                     return True
             # return False if that's not the case for any of the subsets in self
@@ -1240,7 +1285,7 @@ class SubsetUnion(Subset):
 
         if isinstance(other, SubsetUnion):
             for subset in self.subset_list:
-                # check if ther is a subset in self that covers every subset in other
+                # check if there is a subset in self that covers every subset in other
                 if all(subset.covers_precise(s) for s in other.subset_list):
                     return True
             # return False if that's not the case for any of the subsets in self
