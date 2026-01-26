@@ -31,11 +31,11 @@ np_dtype = np.float64
 
 # Map-Reduce version of matrix multiplication
 @dace.program
-def matmul(A: dtype[M, K], B: dtype[K, N], C: dtype[M, N]):
-    tmp = np.ndarray([M, N, K], dtype=A.dtype)
+def matmul(A: dtype[16*M, 16*K], B: dtype[16*K, 16*N], C: dtype[16*M, 16*N]):
+    tmp = np.ndarray([16*M, 16*N, 16*K], dtype=A.dtype)
 
     # Multiply every pair of values to a large 3D temporary array
-    for i, j, k in dace.map[0:M, 0:N, 0:K]:
+    for i, j, k in dace.map[0:16*M, 0:16*N, 0:16*K]:
         with dace.tasklet:
             in_A << A[i, k]
             in_B << B[k, j]

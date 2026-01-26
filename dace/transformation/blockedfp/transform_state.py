@@ -17,7 +17,7 @@ def blockedfp_transform_state(
     # Map Tiling
     tile_maps(sdfg, state, array_names, blocking_factor)
     
-    sdfg.apply_transformations(ExtendMapTransform, options={"names": array_names, "blocking_factor": blocking_factor}, validate=True)
+    sdfg.apply_transformations(ExtendMapTransform, options={"names": array_names, "blocking_factor": blocking_factor}, validate=False)
 
 
 class ExtendMapTransform(xf.SingleStateTransformation):
@@ -298,6 +298,8 @@ def add_lib(
         match classification["op"]:
             case '+':
                 libnode = bfplib.BFPAddNode(tasklet.name)
+            case '*':
+                libnode = bfplib.BFPMultNode(tasklet.name)
     elif classification["type"] is tutil.TaskletType.ARRAY_SCALAR_ASSIGNMENT or classification["type"] is tutil.TaskletType.ARRAY_ARRAY_ASSIGNMENT:
         libnode = bfplib.BFPAssignScalarNode(tasklet.name)
     else:

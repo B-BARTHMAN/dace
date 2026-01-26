@@ -231,7 +231,7 @@ def cast_in_bias(
         access_input = state.add_access(name)
         
         # Map iteration space
-        map_ranges = make_block_map_ranges(sdfg.arrays[name].shape)
+        map_ranges = make_block_map_ranges(sdfg.arrays[name].shape, blocking_factor=blocking_factor)
         map_indices = tuple(
             dace.symbolic.SymExpr(f"{blocking_factor} * i{dim} + j{dim}")
             for dim in range(len(sdfg.arrays[name].shape))
