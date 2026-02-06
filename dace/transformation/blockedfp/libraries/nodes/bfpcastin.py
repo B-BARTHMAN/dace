@@ -91,3 +91,5 @@ class BFPCastinNode(dace.nodes.LibraryNode):
     def __init__(self, name, symbol_mapping: Dict[str, str] = None):
         self.symbol_mapping = symbol_mapping
         super().__init__(name, inputs={"array"}, outputs={"scale", "bias", "fp"})
+
+bfpcastin_1d.to_sdfg().compile()
