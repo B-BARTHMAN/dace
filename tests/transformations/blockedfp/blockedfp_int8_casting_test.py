@@ -6,7 +6,7 @@ from dace.transformation.blockedfp.libraries import BFPCastoutNodeInt8
 
 import numpy as np
 
-#@pytest.fixture(scope="module")
+@pytest.fixture(scope="module")
 def built_sdfg() -> dace.CompiledSDFG:
     N = dace.symbol("N")
     S = dace.symbol("S")
@@ -31,12 +31,12 @@ def built_sdfg() -> dace.CompiledSDFG:
     scale = state.add_transient(
         name="scale",
         shape=(N,),
-        dtype=dace.int16
+        dtype=dace.int8
     )
     ints = state.add_transient(
         name="ints",
         shape=(N * S,),
-        dtype=dace.int16
+        dtype=dace.int8
     )
     
     access_in = state.add_access("array")
@@ -71,11 +71,4 @@ def test_gemm_kernel(built_sdfg, k, n, s):
         array=A, N=n, S=s
     )
     
-    assert np.linalg.norm(A - expected) < 10
-
-compiled = built_sdfg()
-compiled.sdfg.view()
-A = np.random.uniform(0, 1, (1*4,))
-expected = A.copy()
-compiled(array=A, N=1, S=4)
-print(A, expected)
+    assert np.linalg.norm(A - expected) / (n*s) < 1

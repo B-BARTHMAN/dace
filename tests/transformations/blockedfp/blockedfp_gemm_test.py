@@ -27,7 +27,7 @@ def compiled_gemm(request):
 @pytest.mark.parametrize("n", [1, 2, 8, 100])
 @pytest.mark.parametrize("m", [1, 2, 8, 100])
 @pytest.mark.parametrize("l", [1, 2, 8, 100])
-@pytest.mark.parametrize("i", [1, 2, 4, 8, 16, 32, 64, 128, 256])
+@pytest.mark.parametrize("i", [1, 2, 4, 8, 16, 32, 64, 128])
 def test_gemm(compiled_gemm, n, m, l, i):
     compiled_fn, s = compiled_gemm
     

@@ -33,8 +33,9 @@ def bfpgemm(
     
     for block_i, block_j, i, j in dace.map[0:N, 0:L, 0:S, 0:S]:
         c_bias[block_i, block_j] += full_res[S * block_i + i, S * block_j + j] / (S * S)
-    for block_i, block_j, i, j in dace.map[0:N, 0:L, 0:S, 0:S]:
-        c_scale[block_i, block_j] = max(abs(full_res[S * block_i + i, S * block_j + j] - c_bias[block_i, block_j]), c_scale[block_i, block_j])
+    for block_i, block_j in dace.map[0:N, 0:L]:
+        for i, j in dace.map[0:S, 0:S]:
+            c_scale[block_i, block_j] = max(abs(full_res[S * block_i + i, S * block_j + j] - c_bias[block_i, block_j]), c_scale[block_i, block_j])
     for block_i, block_j, i, j in dace.map[0:N, 0:L, 0:S, 0:S]:
         c_fp[S * block_i + i, S * block_j + j] = (full_res[S * block_i + i, S * block_j + j] - c_bias[block_i, block_j]) / c_scale[block_i, block_j]
 

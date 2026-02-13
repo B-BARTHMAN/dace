@@ -19,8 +19,9 @@ def bfpcastin_1d(
         bias[block_i] = 0
     for block_i, i in dace.map[0:N, 0:S]:
         bias[block_i] += array[S * block_i + i] / S
-    for block_i, i in dace.map[0:N, 0:S]:
-        scale[block_i] = max(abs(array[S * block_i + i] - bias[block_i]), scale[block_i])
+    for block_i in dace.map[0:N]:
+        for i in dace.map[0:S] @ dace.ScheduleType.Sequential:
+            scale[block_i] = max(abs(array[S * block_i + i] - bias[block_i]), scale[block_i])
     for block_i, i in dace.map[0:N, 0:S]:
         fp[S * block_i + i] = (array[S * block_i + i] - bias[block_i]) / scale[block_i]
 
@@ -35,8 +36,9 @@ def bfpcastin_2d(
         bias[block_i, block_j] = 0
     for block_i, block_j, i, j in dace.map[0:N, 0:M, 0:S, 0:S]:
         bias[block_i, block_j] += array[S * block_i + i, S * block_j + j] / (S * S)
-    for block_i, block_j, i, j in dace.map[0:N, 0:M, 0:S, 0:S]:
-        scale[block_i, block_j] = max(abs(array[S * block_i + i, S * block_j + j] - bias[block_i, block_j]), scale[block_i, block_j])
+    for block_i, block_j in dace.map[0:N, 0:M]:
+        for i, j in dace.map[0:S, 0:S] @ dace.ScheduleType.Sequential:
+            scale[block_i, block_j] = max(abs(array[S * block_i + i, S * block_j + j] - bias[block_i, block_j]), scale[block_i, block_j])
     for block_i, block_j, i, j in dace.map[0:N, 0:M, 0:S, 0:S]:
         fp[S * block_i + i, S * block_j + j] = (array[S * block_i + i, S * block_j + j] - bias[block_i, block_j]) / scale[block_i, block_j]
     
@@ -92,4 +94,3 @@ class BFPCastinNode(dace.nodes.LibraryNode):
         self.symbol_mapping = symbol_mapping
         super().__init__(name, inputs={"array"}, outputs={"scale", "bias", "fp"})
 
-bfpcastin_1d.to_sdfg().compile()

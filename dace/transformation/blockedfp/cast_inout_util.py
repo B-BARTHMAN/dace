@@ -14,13 +14,14 @@ class CastInOutInfo:
 def cast_inout_util(
     sdfg: dace.SDFG,
     edge: MultiConnectorEdge[dace.Memlet],
-    blocking_factor: int = 16
+    blocking_factor: int = 16,
+    use_int8: bool = False
 ) -> CastInOutInfo:
 
     name = edge.data.data
     array = sdfg.arrays[name]
 
-    fp_name = f"{name}_fp"
+    fp_name = f"{name}_ints" if use_int8 else f"{name}_fp"
     bias_name = f"{name}_bias"
     scale_name = f"{name}_scale"
 
@@ -28,7 +29,7 @@ def cast_inout_util(
         sdfg.add_array(
             name=fp_name,
             shape=array.shape,
-            dtype=dace.float32,
+            dtype=dace.int8 if use_int8 else dace.float32,
             storage=array.storage,
             location=array.location,
             transient=True
@@ -51,7 +52,7 @@ def cast_inout_util(
         sdfg.add_array(
             name=scale_name,
             shape=block_shape,
-            dtype=dace.float64,
+            dtype=dace.int8 if use_int8 else dace.float64,
             storage=array.storage,
             location=array.location,
             transient=True

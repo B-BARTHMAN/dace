@@ -10,7 +10,7 @@ S = dace.symbol("S")
 
 @dace.program
 def bfpcastout_int8_1d(
-    bias: dace.float64[N], scale: dace.int16[N], ints: dace.int16[N * S],
+    bias: dace.float64[N], scale: dace.int8[N], ints: dace.int8[N * S],
     array: dace.float64[N * S]
     ):
     
@@ -21,6 +21,20 @@ def bfpcastout_int8_1d(
     
     for block_i, i in dace.map[0:N, 0:S]:
         array[S * block_i + i] = bias[block_i] + scale_fp[block_i] * ints[S * block_i + i]
+
+@dace.program
+def bfpcastout_int8_2d(
+    bias: dace.float64[N, M], scale: dace.int8[N, M], ints: dace.int8[N * S, M * S],
+    array: dace.float64[N * S, M * S]
+    ):
+    
+    scale_fp = dace.define_local((N, M), dtype=dace.float64)
+    
+    for block_i, block_j in dace.map[0:N, 0:M]:
+        scale_fp[block_i, block_j] = 2.0 ** scale[block_i, block_j]
+    
+    for block_i, block_j, i, j in dace.map[0:N, 0:M, 0:S, 0:S]:
+        array[S * block_i + i, S * block_j + j] = bias[block_i, block_j] + scale_fp[block_i, block_j] * ints[S * block_i + i, S * block_j + j]
 
 @expansion
 class ExpandBFPCastoutNodeInt8(ExpandTransformation):
@@ -41,11 +55,10 @@ class ExpandBFPCastoutNodeInt8(ExpandTransformation):
                 array
             )
         elif len(array.shape) == 2:
-            raise ValueError("NOT YET")
-            # sdfg = bfpcastin_2d.to_sdfg(
-            #     array,
-            #     scale, bias, fp
-            # )
+            sdfg = bfpcastout_int8_2d.to_sdfg(
+                array,
+                scale, bias, ints
+            )
         else:
             raise ValueError(f"BFP Castin can not handle dimensions '{len(array.shape)}'")
         
@@ -74,3 +87,8 @@ class BFPCastoutNodeInt8(dace.nodes.LibraryNode):
     def __init__(self, name, symbol_mapping: Dict[str, str] = None):
         self.symbol_mapping = symbol_mapping
         super().__init__(name, inputs={"bias", "scale", "ints"}, outputs={"array"})
+
+
+sdfg = bfpcastout_int8_1d.to_sdfg()
+sdfg.simplify()
+sdfg.compile()

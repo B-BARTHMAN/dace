@@ -18,8 +18,9 @@ class BlockedFPGEMMTransform(xf.SingleStateTransformation):
     C_access = xf.PatternNode(dace.nodes.AccessNode)
     Library = xf.PatternNode(dace.nodes.LibraryNode)
     
-    def __init__(self, blocking_factor: int = 16):
+    def __init__(self, blocking_factor: int = 16, use_int8: bool = False):
         self._blocking_factor = blocking_factor
+        self._use_int8 = use_int8  # <-- new parameter
 
     @classmethod
     def expressions(cls):
@@ -36,8 +37,6 @@ class BlockedFPGEMMTransform(xf.SingleStateTransformation):
         for edge in graph.out_edges(self.A_access):
             if edge.dst != self.Library:
                 continue
-            
-            # Get symbols for shape
             shape = sdfg.arrays[edge.data.data].shape
             symbol_N = str(dace.symbolic.SymExpr(f"{shape[0]}/{self._blocking_factor}"))
             symbol_M = str(dace.symbolic.SymExpr(f"{shape[1]}/{self._blocking_factor}"))
@@ -45,184 +44,123 @@ class BlockedFPGEMMTransform(xf.SingleStateTransformation):
         for edge in graph.out_edges(self.B_access):
             if edge.dst != self.Library:
                 continue
-            
-            # Get symbols for shape
             shape = sdfg.arrays[edge.data.data].shape
             symbol_L = str(dace.symbolic.SymExpr(f"{shape[1]}/{self._blocking_factor}"))
         
-        # Add new library node
-        libnode = bfplib.BFPGemmNode(
-            name = "_BFP_MatMult_gemm",
-            symbol_mapping={
-                "N": symbol_N,
-                "M": symbol_M,
-                "L": symbol_L,
-                "S": "S"
-                }
-            )
+        # Pick library node class
+        libnode_class = bfplib.BFPGemmInt8Node if self._use_int8 else bfplib.BFPGemmNode
+        libnode = libnode_class(
+            name=f"_BFP_MatMult_gemm{self.A_access.data}",
+            symbol_mapping={"N": symbol_N, "M": symbol_M, "L": symbol_L, "S": "S"}
+        )
         graph.add_node(libnode)
-        
+
+        # Pick castin/castout classes
+        castin_class = bfplib.BFPCastinNodeInt8 if self._use_int8 else bfplib.BFPCastinNode
+        castout_class = bfplib.BFPCastoutNodeInt8 if self._use_int8 else bfplib.BFPCastoutNode
+
+        # Define input/output names depending on int8 flag
+        if self._use_int8:
+            a_in = ("a_bias", "a_scale", "a_ints")
+            b_in = ("b_bias", "b_scale", "b_ints")
+            c_out = ("c_bias", "c_scale", "c_ints")
+        else:
+            a_in = ("a_bias", "a_scale", "a_fp")
+            b_in = ("b_bias", "b_scale", "b_fp")
+            c_out = ("c_bias", "c_scale", "c_fp")
+
+        # -------------------
         # Connect A access
         for edge in graph.out_edges(self.A_access):
             if edge.dst != self.Library:
                 continue
-            
-            castin = bfplib.BFPCastinNode(
-                name = f"BFPCastin_{edge.data.data}",
-                symbol_mapping={
-                    "N": symbol_N,
-                    "M": symbol_M,
-                    "S": "S"
-                }
+
+            castin = castin_class(
+                name=f"BFPCastin_{edge.data.data}",
+                symbol_mapping={"N": symbol_N, "M": symbol_M, "S": "S"}
             )
-            graph.add_node(castin)      
+            graph.add_node(castin)
 
-            info = cast_inout_util(sdfg, edge, self._blocking_factor)       
+            info = cast_inout_util(sdfg, edge, self._blocking_factor, self._use_int8)
 
-            fp = graph.add_access(info.fp)
-            bias = graph.add_access(info.bias)
-            scale = graph.add_access(info.scale)        
+            out1 = graph.add_access(info.fp)
+            out2 = graph.add_access(info.bias)
+            out3 = graph.add_access(info.scale)
 
             # Original array -> castin
-            graph.add_edge(edge.src, edge.src_conn, castin, "array", edge.data)     
+            graph.add_edge(edge.src, edge.src_conn, castin, "array", edge.data)
 
-            # fp path
-            graph.add_edge(
-                castin, "fp", fp, None,
-                dace.Memlet(data=info.fp, subset=info.fp_subset)
-            )
-            graph.add_edge(
-                fp, None, libnode, "a_fp",
-                dace.Memlet(data=info.fp, subset=info.fp_subset)
-            )       
+            # Map outputs in correct order
+            conn_name = "ints" if self._use_int8 else "fp"
+            graph.add_edge(castin, conn_name, out1, None, dace.Memlet(data=info.fp, subset=info.fp_subset))
+            graph.add_edge(out1, None, libnode, a_in[2], dace.Memlet(data=info.fp, subset=info.fp_subset))
 
-            # bias path
-            graph.add_edge(
-                castin, "bias", bias, None,
-                dace.Memlet(data=info.bias, subset=info.block_subset)
-            )
-            graph.add_edge(
-                bias, None, libnode, "a_bias",
-                dace.Memlet(data=info.bias, subset=info.block_subset)
-            )       
+            graph.add_edge(castin, "bias", out2, None, dace.Memlet(data=info.bias, subset=info.block_subset))
+            graph.add_edge(out2, None, libnode, a_in[0], dace.Memlet(data=info.bias, subset=info.block_subset))
 
-            # scale path
-            graph.add_edge(
-                castin, "scale", scale, None,
-                dace.Memlet(data=info.scale, subset=info.block_subset)
-            )
-            graph.add_edge(
-                scale, None, libnode, "a_scale",
-                dace.Memlet(data=info.scale, subset=info.block_subset)
-            )
-        
+            graph.add_edge(castin, "scale", out3, None, dace.Memlet(data=info.scale, subset=info.block_subset))
+            graph.add_edge(out3, None, libnode, a_in[1], dace.Memlet(data=info.scale, subset=info.block_subset))
+
+        # -------------------
         # Connect B access
         for edge in graph.out_edges(self.B_access):
             if edge.dst != self.Library:
                 continue
+
+            castin = castin_class(
+                name=f"BFPCastin_{edge.data.data}",
+                symbol_mapping={"N": symbol_M, "M": symbol_L, "S": "S"}
+            )
+            graph.add_node(castin)
+
+            info = cast_inout_util(sdfg, edge, self._blocking_factor, self._use_int8)
+
+            out1 = graph.add_access(info.fp)
+            out2 = graph.add_access(info.bias)
+            out3 = graph.add_access(info.scale)
+
+            graph.add_edge(edge.src, edge.src_conn, castin, "array", edge.data)
             
-            castin = bfplib.BFPCastinNode(
-                name = f"BFPCastin_{edge.data.data}",
-                symbol_mapping={
-                    "N": symbol_M,
-                    "M": symbol_L,
-                    "S": "S"
-                }
-            )
-            graph.add_node(castin)      
+            conn_name = "ints" if self._use_int8 else "fp"
+            graph.add_edge(castin, conn_name, out1, None, dace.Memlet(data=info.fp, subset=info.fp_subset))
+            graph.add_edge(out1, None, libnode, b_in[2], dace.Memlet(data=info.fp, subset=info.fp_subset))
 
-            info = cast_inout_util(sdfg, edge, self._blocking_factor)       
+            graph.add_edge(castin, "bias", out2, None, dace.Memlet(data=info.bias, subset=info.block_subset))
+            graph.add_edge(out2, None, libnode, b_in[0], dace.Memlet(data=info.bias, subset=info.block_subset))
 
-            fp = graph.add_access(info.fp)
-            bias = graph.add_access(info.bias)
-            scale = graph.add_access(info.scale)        
+            graph.add_edge(castin, "scale", out3, None, dace.Memlet(data=info.scale, subset=info.block_subset))
+            graph.add_edge(out3, None, libnode, b_in[1], dace.Memlet(data=info.scale, subset=info.block_subset))
 
-            # Original array -> castin
-            graph.add_edge(edge.src, edge.src_conn, castin, "array", edge.data)     
-
-            # fp path
-            graph.add_edge(
-                castin, "fp", fp, None,
-                dace.Memlet(data=info.fp, subset=info.fp_subset)
-            )
-            graph.add_edge(
-                fp, None, libnode, "b_fp",
-                dace.Memlet(data=info.fp, subset=info.fp_subset)
-            )       
-
-            # bias path
-            graph.add_edge(
-                castin, "bias", bias, None,
-                dace.Memlet(data=info.bias, subset=info.block_subset)
-            )
-            graph.add_edge(
-                bias, None, libnode, "b_bias",
-                dace.Memlet(data=info.bias, subset=info.block_subset)
-            )       
-
-            # scale path
-            graph.add_edge(
-                castin, "scale", scale, None,
-                dace.Memlet(data=info.scale, subset=info.block_subset)
-            )
-            graph.add_edge(
-                scale, None, libnode, "b_scale",
-                dace.Memlet(data=info.scale, subset=info.block_subset)
-            )
-        
+        # -------------------
         # Connect C access
         for edge in graph.out_edges(self.Library):
             if edge.dst != self.C_access:
                 continue
-            
-            castout = bfplib.BFPCastoutNode(
-                name = f"BFPCastout_{edge.data.data}",
-                symbol_mapping={
-                    "N": symbol_N,
-                    "M": symbol_L,
-                    "S": "S"
-                }
+
+            castout = castout_class(
+                name=f"BFPCastout_{edge.data.data}",
+                symbol_mapping={"N": symbol_N, "M": symbol_L, "S": "S"}
             )
             graph.add_node(castout)
 
-            info = cast_inout_util(sdfg, edge, self._blocking_factor)
+            info = cast_inout_util(sdfg, edge, self._blocking_factor, self._use_int8)
 
-            fp = graph.add_access(info.fp)
-            bias = graph.add_access(info.bias)
-            scale = graph.add_access(info.scale)
+            out1 = graph.add_access(info.fp)
+            out2 = graph.add_access(info.bias)
+            out3 = graph.add_access(info.scale)
+            
+            conn_name = "ints" if self._use_int8 else "fp"
+            graph.add_edge(libnode, c_out[2], out1, None, dace.Memlet(data=info.fp, subset=info.fp_subset))
+            graph.add_edge(out1, None, castout, conn_name, dace.Memlet(data=info.fp, subset=info.fp_subset))
 
-            # fp path
-            graph.add_edge(
-                libnode, "c_fp", fp, None,
-                dace.Memlet(data=info.fp, subset=info.fp_subset)
-            )
-            graph.add_edge(
-                fp, None, castout, "fp",
-                dace.Memlet(data=info.fp, subset=info.fp_subset)
-            )
+            graph.add_edge(libnode, c_out[0], out2, None, dace.Memlet(data=info.bias, subset=info.block_subset))
+            graph.add_edge(out2, None, castout, "bias", dace.Memlet(data=info.bias, subset=info.block_subset))
 
-            # bias path
-            graph.add_edge(
-                libnode, "c_bias", bias, None,
-                dace.Memlet(data=info.bias, subset=info.block_subset)
-            )
-            graph.add_edge(
-                bias, None, castout, "bias",
-                dace.Memlet(data=info.bias, subset=info.block_subset)
-            )
-
-            # scale path
-            graph.add_edge(
-                libnode, "c_scale", scale, None,
-                dace.Memlet(data=info.scale, subset=info.block_subset)
-            )
-            graph.add_edge(
-                scale, None, castout, "scale",
-                dace.Memlet(data=info.scale, subset=info.block_subset)
-            )
+            graph.add_edge(libnode, c_out[1], out3, None, dace.Memlet(data=info.scale, subset=info.block_subset))
+            graph.add_edge(out3, None, castout, "scale", dace.Memlet(data=info.scale, subset=info.block_subset))
 
             # castout → original array
             graph.add_edge(castout, "array", edge.dst, edge.dst_conn, edge.data)
 
-        # Delete all old nodes
+        # Delete old library node
         graph.remove_node(self.Library)
